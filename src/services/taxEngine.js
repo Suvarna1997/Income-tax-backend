@@ -102,12 +102,12 @@ function calcSurcharge(tax, taxable, maxRate) {
 // Section 87A rebate with marginal relief
 function applyRebate87A(tax, taxable, rebate_87a) {
   const { income_limit, max_rebate } = rebate_87a;
-  if (taxable > income_limit) return tax;
-  const rebate = Math.min(tax, max_rebate);
-  const afterRebate = Math.max(0, tax - rebate);
-  // Marginal relief: tax should not exceed income above the rebate threshold
-  const marginalCap = Math.max(0, taxable - income_limit);
-  return Math.min(afterRebate, marginalCap);
+  if (taxable <= income_limit) {
+    return Math.max(0, tax - Math.min(tax, max_rebate));
+  }
+  // Income above threshold: cap tax at excess over limit (marginal relief)
+  const extra = taxable - income_limit;
+  return Math.min(tax, extra);
 }
 
 const round = (n) => Math.round(n);
@@ -128,6 +128,38 @@ function compute80GG({ rent_paid = 0, gross = 0, has_hra = false }) {
   const fixed_cap = DEDUCTION_LIMITS.sec_80gg;
   const twenty_five_percent = 0.25 * gross;
   return Math.min(excess_rent, fixed_cap, twenty_five_percent);
+}
+
+function fmt(n) { return "₹" + Math.round(n).toLocaleString("en-IN"); }
+
+function generateSavingsTips({ best, old_total, new_total, ded_80c, ded_80ccd1b, deductions }) {
+  const tips = [];
+  const remaining_80c = Math.max(0, DEDUCTION_LIMITS.sec_80c - ded_80c);
+  const remaining_nps = Math.max(0, DEDUCTION_LIMITS.sec_80ccd_1b - ded_80ccd1b);
+  const savings = Math.abs(old_total - new_total);
+
+  if (best === "old") {
+    if (remaining_80c > 0) {
+      tips.push({ title: `Invest ${fmt(remaining_80c)} more under 80C`, detail: `Use ELSS, PPF, or NSC to reduce taxable income by ${fmt(remaining_80c)}.`, color: "green" });
+    }
+    if (remaining_nps > 0) {
+      tips.push({ title: `NPS gives extra ${fmt(remaining_nps)} deduction under 80CCD(1B)`, detail: `NPS Tier-1 up to ${fmt(remaining_nps)} gives deduction OVER your 80C limit.`, color: "blue" });
+    }
+    if (!deductions.sec_80d_self) {
+      tips.push({ title: "Health insurance — save up to ₹25,000 under 80D", detail: "Premium for yourself, spouse, and children. Up to ₹25,000 deductible.", color: "purple" });
+    }
+    if (!deductions.sec_24b_home_loan) {
+      tips.push({ title: "Home loan interest deductible up to ₹2L under 24(b)", detail: "Interest on self-occupied home loan up to ₹2,00,000/year.", color: "amber" });
+    }
+  } else {
+    tips.push({ title: `New regime saves ${fmt(savings)}/year`, detail: `Your tax is ${fmt(savings)} lower in new regime. No need to lock money in tax-saving instruments.`, color: "green" });
+    tips.push({ title: "Employer NPS still works in new regime", detail: "Employer NPS contribution under 80CCD(2) is allowed even in new regime — ask HR to restructure.", color: "blue" });
+  }
+
+  if (tips.length === 0) {
+    tips.push({ title: "All major deductions claimed", detail: "Consider 80E (education loan), 80G (donations), or 80TTA (savings bank interest).", color: "slate" });
+  }
+  return tips;
 }
 
 function calculateTax(input) {
@@ -221,8 +253,12 @@ function calculateTax(input) {
   const new_cess = (new_base + new_sur) * CESS_RATE;
   const new_total = round(new_base + new_sur + new_cess);
 
-  const best = old_total <= new_total ? "old" : "new";
-  const savings = Math.abs(old_total - new_total);
+  // Prefer new regime when difference ≤ ₹500 (simpler, no deduction tracking)
+  const diff = old_total - new_total;
+  const best = diff > 500 ? "old" : "new";
+  const savings = Math.abs(diff);
+
+  const tips = generateSavingsTips({ best, old_total, new_total, ded_80c, ded_80ccd1b, deductions });
 
   return {
     fy: config.fy,
@@ -249,13 +285,20 @@ function calculateTax(input) {
       taxable_income: round(new_taxable),
       deductions: new_deductions,
     },
+    pf_details: {
+      annual_contribution: round(pf),
+      balance: round(pf * (input.years_of_service || 3)),
+      years_of_service: input.years_of_service || 3,
+    },
+    savings_tips: tips,
     recommendation: {
       best_option: best,
       savings: round(savings),
-      reason:
-        best === "old"
-          ? `Old regime saves ₹${round(savings).toLocaleString("en-IN")}. Your deductions (80C, HRA, etc.) reduce taxable income enough to beat the new regime's lower slab rates.`
-          : `New regime saves ₹${round(savings).toLocaleString("en-IN")}. Lower slab rates outweigh the deductions you can claim under old regime.`,
+      reason: best === "old"
+        ? `Old regime saves ${fmt(savings)} vs new regime. Your deductions (HRA, 80C, etc.) lower taxable income by ${fmt(old_total_ded)}, making old regime better. Old: ${fmt(old_total)} · New: ${fmt(new_total)}.`
+        : savings <= 500
+        ? `Both regimes nearly equal (difference: ${fmt(savings)}). New regime recommended — no deduction tracking needed. Old: ${fmt(old_total)} · New: ${fmt(new_total)}.`
+        : `New regime saves ${fmt(savings)} vs old regime. Lower slab rates beat your deductions. Old: ${fmt(old_total)} · New: ${fmt(new_total)}.`,
     },
   };
 }

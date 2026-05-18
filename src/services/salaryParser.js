@@ -1,11 +1,18 @@
-// Salary slip parser — handles three PDF extraction formats:
-//   Block  : Labels in a pure-text block, values in the pure-number block below (Amdocs/ADP)
-//   Lines  : "Label: 12,345" or "Label   12,345" on the same line
-//   Concat : "BasicPay8000Tax800" — label and value merged with no separator
+// Salary slip parser — handles multiple PDF text extraction formats:
+//   Block  : Labels in one column, values in another column (common in large payroll systems)
+//   Lines  : "Basic Salary: 50,000" or "Basic Salary   50,000" on same line
+//   Concat : "BasicPay8000Tax800" — label and value merged, no separator
+//   Multi  : Multiple pairs per line "Basic Pay  50000  HRA  20000  PF  6000"
 
 const FIELDS = [
-  { key: "basic",            aliases: ["basic salary", "basic pay", "basic wages", "basic"] },
-  { key: "hra",              aliases: ["house rent allowance", "hra", "house rent", "rent allowance", "h.r.a", "hra-house rent"] },
+  { key: "basic",            aliases: ["basic salary", "basic pay", "basic wages", "basic", "basic component", "base salary", "base pay"] },
+  {
+    key: "hra",
+    aliases: [
+      "house rent allowance", "hra", "house rent", "rent allowance",
+      "h.r.a", "hra-house rent", "h.r.a.", "housing rent allowance",
+    ],
+  },
   {
     key: "allowances",
     aliases: [
@@ -14,7 +21,10 @@ const FIELDS = [
       "medical allowance", "lta", "leave travel allowance", "leave travel assistance",
       "city compensatory allowance", "cca", "dearness allowance", "da",
       "flexible benefit", "fba", "fuel allowance", "allowances", "allowance",
-      "overtime", "overtime pay",
+      "overtime", "overtime pay", "shift allowance", "night allowance",
+      "education allowance", "uniform allowance", "telephone allowance",
+      "internet allowance", "food allowance", "meal allowance",
+      "performance allowance", "additional allowance", "other pay",
     ],
     sum: true,
   },
@@ -23,16 +33,49 @@ const FIELDS = [
     aliases: [
       "bonus", "performance bonus", "annual bonus", "incentive", "variable pay",
       "ex-gratia", "ex gratia", "joining bonus", "retention bonus",
-      "annual performance incentive", "performance incentive",
+      "annual performance incentive", "performance incentive", "pli",
+      "production linked incentive", "special bonus",
     ],
     sum: true,
   },
-  { key: "pf",               aliases: ["provident fund", "employee pf", "employee provident fund", "epf", "pf deduction", "pf", "vpf", "p.f.", "e.p.f"] },
-  { key: "professional_tax", aliases: ["professional tax", "p.tax", "p tax", "ptax", "prof. tax", "prof tax", "profession tax", "pt"] },
-  { key: "tds",              aliases: ["tds", "income tax deducted", "tax deducted at source", "it deduction", "income tax", "it", "tax"] },
-  { key: "gross",            aliases: ["gross earnings", "gross salary", "gross pay", "total earnings", "total gross", "gross total", "total earning"] },
-  { key: "net",              aliases: ["net salary", "net pay", "take home", "take-home", "net amount", "amount payable", "net payable"] },
-  { key: "ctc",              aliases: ["ctc", "cost to company", "annual ctc", "total ctc"] },
+  {
+    key: "pf",
+    aliases: [
+      "provident fund", "employee pf", "employee provident fund", "epf",
+      "pf deduction", "pf", "vpf", "p.f.", "e.p.f", "pf contribution",
+      "employee contribution", "pf - employee", "pf(employee)",
+    ],
+  },
+  {
+    key: "professional_tax",
+    aliases: [
+      "professional tax", "p.tax", "p tax", "ptax", "prof. tax",
+      "prof tax", "profession tax", "pt", "professional tax deduction",
+    ],
+  },
+  {
+    key: "tds",
+    aliases: [
+      "tds", "income tax deducted", "tax deducted at source", "it deduction",
+      "income tax", "it", "tax", "tds deducted", "income tax tds",
+    ],
+  },
+  {
+    key: "gross",
+    aliases: [
+      "gross earnings", "gross salary", "gross pay", "total earnings",
+      "total gross", "gross total", "total earning", "gross ctc",
+      "total income", "total salary",
+    ],
+  },
+  {
+    key: "net",
+    aliases: [
+      "net salary", "net pay", "take home", "take-home", "net amount",
+      "amount payable", "net payable", "net income", "net wages",
+    ],
+  },
+  { key: "ctc", aliases: ["ctc", "cost to company", "annual ctc", "total ctc", "gross ctc"] },
 ];
 
 const ALIAS_MAP = new Map();
@@ -43,18 +86,21 @@ for (const f of FIELDS) {
 }
 
 function matchAlias(label) {
-  const l = label.toLowerCase().trim();
+  const l = label.toLowerCase().trim().replace(/\s+/g, " ");
   if (ALIAS_MAP.has(l)) return ALIAS_MAP.get(l);
+  // Partial-word match for common variants
   for (const [alias, meta] of ALIAS_MAP) {
-    if (l === alias || l.startsWith(alias + " ") || alias.startsWith(l + " ")) return meta;
+    if (l === alias) return meta;
+    if (l.startsWith(alias + " ") || alias.startsWith(l + " ")) return meta;
+    if (l.includes(alias) && alias.length > 5) return meta;
   }
   return null;
 }
 
 function toNumber(s) {
-  if (!s) return null;
+  if (s == null) return null;
   const cleaned = String(s).replace(/,/g, "").replace(/[^\d.\-]/g, "");
-  if (!cleaned || cleaned === ".") return null;
+  if (!cleaned || cleaned === "." || cleaned === "-") return null;
   const n = parseFloat(cleaned);
   return Number.isFinite(n) && n >= 0 ? n : null;
 }
@@ -68,7 +114,7 @@ function isNumberLine(s) {
 // A line is purely textual (no digit characters at all)
 function isPureTextLine(s) {
   const t = s.trim();
-  return t.length > 0 && /[a-zA-Z]/.test(t) && !/\d/.test(t);
+  return t.length > 1 && /[a-zA-Z]/.test(t) && !/\d/.test(t);
 }
 
 // A line has mixed text+digits (neither pure text nor pure number)
@@ -78,18 +124,20 @@ function isMixedLine(s) {
 }
 
 function detectFrequency(text) {
-  if (/(payslip|pay\s*slip|month\s*of|pay\s*period|for\s*the\s*month|monthly\s*salary|monthly\s*earnings)/i.test(text))
-    return "monthly";
-  if (/(annual\s*ctc|annual\s*gross|per\s*annum|p\.a\.|yearly|annual\s*salary)/i.test(text))
+  const t = text.toLowerCase();
+  // Annual markers — check first so annual CTCs aren't treated as monthly
+  if (/(annual\s*ctc|annual\s*gross|per\s*annum|p\.a\.|yearly|annual\s*salary|annual\s*statement)/i.test(t))
     return "annual";
+  // Monthly markers
+  if (/(payslip|pay\s*slip|salary\s*slip|salary\s*statement|month\s*of|pay\s*period|for\s*the\s*month|monthly\s*salary|monthly\s*earnings|monthly\s*statement|pay\s*stub|wage\s*slip|paycheck)/i.test(t))
+    return "monthly";
   return "unknown";
 }
 
-// ─── Strategy 1: Block format (Amdocs/ADP) ──────────────────────────────────
+// ─── Strategy 1: Block format ─────────────────────────────────────────────────
 // Detects "Earnings...Amount" table header, then:
-//   - pure-text lines   → label block
-//   - pure-number lines → value block (first N = current month, next N = YTD)
-// Processes earnings section then deductions section separately.
+//   pure-text lines → label block
+//   pure-number lines → value block (first N = current month, next N = YTD — skip YTD)
 function strategyBlock(text) {
   const result = {};
   const lines = text.split(/\n/).map((l) => l.trim()).filter(Boolean);
@@ -148,7 +196,8 @@ function strategyLinePairs(lines) {
   const result = {};
   for (const raw of lines) {
     const line = raw.trim();
-    const m = line.match(/^([A-Za-z][A-Za-z\s\-\.\/()]*?)(?:\s*[:=\-|]\s*|\s{2,})([\d,]+(?:\.\d+)?)\s*$/);
+    // Also handle "Rs. 50,000" or "INR 50,000" prefix on value
+    const m = line.match(/^([A-Za-z][A-Za-z\s\-\.\/()&]*?)(?:\s*[:=\-|]\s*|\s{2,})(?:Rs\.?\s*|INR\s*)?([\d,]+(?:\.\d+)?)\s*$/i);
     if (!m) continue;
     const meta = matchAlias(m[1]);
     if (!meta) continue;
@@ -160,20 +209,22 @@ function strategyLinePairs(lines) {
   return result;
 }
 
-// ─── Strategy 3: Concatenated label+value ────────────────────────────────────
-// "Basic Pay8000Tax800" → [("Basic Pay", 8000), ("Tax", 800)]
-// Only applied to lines that have BOTH letters and digits (mixed lines).
-function strategyConcatenated(lines) {
+// ─── Strategy 3: Multiple label-value pairs per line ─────────────────────────
+// "Basic Pay  50000  HRA  20000  PF  6000"
+// Also handles concatenated "BasicPay8000Tax800"
+function strategyMultiPair(lines) {
   const result = {};
+  const re = /([A-Za-z][A-Za-z\s\-\.\/()&]{1,40}?)\s*(?:[:=]?\s*)(?:Rs\.?\s*|INR\s*)?([\d,]+(?:\.\d+)?)/g;
+
   for (const raw of lines) {
     const line = raw.trim();
     if (!isMixedLine(line)) continue;
-
-    // Split at each text→digit and digit→text boundary
-    const re = /([A-Za-z][A-Za-z\s\-\.\/()]*?)\s*([\d,]+(?:\.\d+)?)/g;
     let m;
+    re.lastIndex = 0;
     while ((m = re.exec(line)) !== null) {
-      const meta = matchAlias(m[1].trim());
+      const label = m[1].trim();
+      if (label.length < 2) continue;
+      const meta = matchAlias(label);
       if (!meta) continue;
       const n = toNumber(m[2]);
       if (n != null && n > 0) {
@@ -184,54 +235,69 @@ function strategyConcatenated(lines) {
   return result;
 }
 
-// ─── Net pay prose extraction ────────────────────────────────────────────────
+// ─── Net pay prose extraction ─────────────────────────────────────────────────
 function extractNetPay(text) {
-  const m = text.match(/net\s*pay\s*:?\s*(?:Rs\.?\s*)?([\d,]+(?:\.\d+)?)/i);
-  if (m) { const n = toNumber(m[1]); return n && n > 0 ? n : null; }
+  const patterns = [
+    /net\s*pay\s*:?\s*(?:Rs\.?\s*|INR\s*)?([\d,]+(?:\.\d+)?)/i,
+    /take[\s-]*home\s*:?\s*(?:Rs\.?\s*)?([\d,]+(?:\.\d+)?)/i,
+    /net\s*amount\s*payable\s*:?\s*(?:Rs\.?\s*)?([\d,]+(?:\.\d+)?)/i,
+  ];
+  for (const p of patterns) {
+    const m = text.match(p);
+    if (m) { const n = toNumber(m[1]); if (n && n > 0) return n; }
+  }
   return null;
+}
+
+// ─── Frequency heuristic when auto-detection fails ───────────────────────────
+function guessFrequency(merged) {
+  const basic = merged.basic;
+  if (!basic) return "unknown";
+  // basic < ₹1L → almost certainly monthly; > ₹5L → annual
+  if (basic < 100000) return "monthly";
+  if (basic > 500000) return "annual";
+  return "monthly"; // default: most payslips are monthly
 }
 
 // ─── Main entry point ─────────────────────────────────────────────────────────
 function parseSalarySlipText(text) {
   if (!text || typeof text !== "string") {
-    return { extracted: {}, missing: FIELDS.slice(0, 6).map((f) => f.key), raw_text: "", frequency: "unknown", confidence: "low" };
+    return {
+      extracted: {},
+      missing: FIELDS.slice(0, 6).map((f) => f.key),
+      raw_text: "",
+      frequency: "unknown",
+      confidence: "low",
+    };
   }
 
-  const frequency = detectFrequency(text);
+  let frequency = detectFrequency(text);
   const lines = text.split(/\n/).map((l) => l.trim()).filter(Boolean);
 
-  // Run all three strategies; merge with priority: Block > Lines > Concat
-  const blockResult  = strategyBlock(text);
-  const lineResult   = strategyLinePairs(lines);
-  const concatResult = strategyConcatenated(lines);
+  // Run all strategies; merge with priority: Block > Lines > Multi
+  const blockResult = strategyBlock(text);
+  const lineResult = strategyLinePairs(lines);
+  const multiResult = strategyMultiPair(lines);
 
-  const merged = { ...concatResult };
-  // Lines strategy overrides concat
+  // Merge: multi first (lowest priority), then lines, then block overrides
+  const merged = { ...multiResult };
   for (const [k, v] of Object.entries(lineResult)) {
-    if (v > 0) merged[k] = Math.round(v);
+    if (v > 0) merged[k] = v;
   }
-  // Block strategy overrides everything
   for (const [k, v] of Object.entries(blockResult)) {
-    if (v > 0) merged[k] = Math.round(v);
-  }
-
-  // For sum fields (allowances, bonuses) — block strategy already sums within its context,
-  // but if lines/concat found extras not in block, add them
-  for (const field of FIELDS.filter((f) => f.sum)) {
-    if (blockResult[field.key] && concatResult[field.key] && concatResult[field.key] !== blockResult[field.key]) {
-      // Don't add — trust block strategy when available
-    }
+    if (v > 0) merged[k] = v;
   }
 
   // Net pay fallback
   if (!merged.net) {
     const np = extractNetPay(text);
-    if (np) merged.net = Math.round(np);
+    if (np) merged.net = np;
   }
 
-  const missing = ["basic", "hra", "allowances", "bonuses", "pf", "professional_tax"].filter(
-    (k) => merged[k] == null
-  );
+  // Guess frequency if still unknown
+  if (frequency === "unknown") {
+    frequency = guessFrequency(merged);
+  }
 
   const multiplier = frequency === "monthly" ? 12 : 1;
   const annualized = {};
@@ -239,10 +305,22 @@ function parseSalarySlipText(text) {
     annualized[k] = Math.round(v * multiplier);
   }
 
+  const missing = ["basic", "hra", "allowances", "bonuses", "pf", "professional_tax"].filter(
+    (k) => annualized[k] == null
+  );
+
   const found = Object.keys(annualized).length;
   const confidence = found >= 4 ? "high" : found >= 2 ? "medium" : "low";
 
-  return { extracted: annualized, extracted_raw: merged, missing, frequency, multiplier, confidence, raw_text: text.slice(0, 3000) };
+  return {
+    extracted: annualized,
+    extracted_raw: merged,
+    missing,
+    frequency,
+    multiplier,
+    confidence,
+    raw_text: text.slice(0, 3000),
+  };
 }
 
 async function parsePdfBuffer(buffer) {

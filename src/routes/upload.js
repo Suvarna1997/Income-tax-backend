@@ -35,10 +35,13 @@ router.post("/", requireAuth, upload.single("file"), async (req, res, next) => {
       return res.status(400).json({ ok: false, error: "No file or text supplied" });
     }
 
-    if (result?.extracted) {
+    const extracted = result?.extracted || {};
+    const isReliable = (result?.confidence === "medium" || result?.confidence === "high")
+      && extracted.basic != null && extracted.basic > 0;
+    if (isReliable) {
       await Profile.findOneAndUpdate(
         { user: req.user._id },
-        { $set: { salary: result.extracted } },
+        { $set: { salary: extracted } },
         { upsert: true, setDefaultsOnInsert: true }
       );
     }
