@@ -253,9 +253,9 @@ function calculateTax(input) {
   const new_cess = (new_base + new_sur) * CESS_RATE;
   const new_total = round(new_base + new_sur + new_cess);
 
-  // Prefer new regime when difference ≤ ₹500 (simpler, no deduction tracking)
+  // Recommend the regime with the lower payable tax.
   const diff = old_total - new_total;
-  const best = diff > 500 ? "old" : "new";
+  const best = old_total < new_total ? "old" : "new";
   const savings = Math.abs(diff);
 
   const tips = generateSavingsTips({ best, old_total, new_total, ded_80c, ded_80ccd1b, deductions });
@@ -294,10 +294,10 @@ function calculateTax(input) {
     recommendation: {
       best_option: best,
       savings: round(savings),
-      reason: best === "old"
+      reason: savings === 0
+        ? `Both regimes have the same tax payable. New regime selected by default. Old: ${fmt(old_total)} · New: ${fmt(new_total)}.`
+        : best === "old"
         ? `Old regime saves ${fmt(savings)} vs new regime. Your deductions (HRA, 80C, etc.) lower taxable income by ${fmt(old_total_ded)}, making old regime better. Old: ${fmt(old_total)} · New: ${fmt(new_total)}.`
-        : savings <= 500
-        ? `Both regimes nearly equal (difference: ${fmt(savings)}). New regime recommended — no deduction tracking needed. Old: ${fmt(old_total)} · New: ${fmt(new_total)}.`
         : `New regime saves ${fmt(savings)} vs old regime. Lower slab rates beat your deductions. Old: ${fmt(old_total)} · New: ${fmt(new_total)}.`,
     },
   };

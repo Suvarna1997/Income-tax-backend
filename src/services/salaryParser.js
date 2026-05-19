@@ -5,7 +5,14 @@
 //   Multi  : Multiple pairs per line "Basic Pay  50000  HRA  20000  PF  6000"
 
 const FIELDS = [
-  { key: "basic",            aliases: ["basic salary", "basic pay", "basic wages", "basic", "basic component", "base salary", "base pay"] },
+  {
+    key: "basic",
+    aliases: [
+      "basic salary", "basic pay", "basic wages", "basic", "basic component",
+      "base salary", "base pay", "basic earning", "basic earnings",
+      "basic da", "basic and da",
+    ],
+  },
   {
     key: "hra",
     aliases: [
@@ -18,6 +25,7 @@ const FIELDS = [
     aliases: [
       "special allowance", "other allowances", "other allowance",
       "conveyance allowance", "conveyance", "transport allowance", "ta",
+      "transportation allowance",
       "medical allowance", "lta", "leave travel allowance", "leave travel assistance",
       "city compensatory allowance", "cca", "dearness allowance", "da",
       "flexible benefit", "fba", "fuel allowance", "allowances", "allowance",
@@ -25,6 +33,8 @@ const FIELDS = [
       "education allowance", "uniform allowance", "telephone allowance",
       "internet allowance", "food allowance", "meal allowance",
       "performance allowance", "additional allowance", "other pay",
+      "washing allowance", "mobile allowance", "books allowance",
+      "statutory bonus", "arrears", "salary arrears", "earnings adjustment",
     ],
     sum: true,
   },
@@ -44,6 +54,8 @@ const FIELDS = [
       "provident fund", "employee pf", "employee provident fund", "epf",
       "pf deduction", "pf", "vpf", "p.f.", "e.p.f", "pf contribution",
       "employee contribution", "pf - employee", "pf(employee)",
+      "employee epf", "epf employee", "provident fund employee",
+      "employee provident fund contribution", "employee pf contribution",
     ],
   },
   {
@@ -58,6 +70,7 @@ const FIELDS = [
     aliases: [
       "tds", "income tax deducted", "tax deducted at source", "it deduction",
       "income tax", "it", "tax", "tds deducted", "income tax tds",
+      "income tax deduction",
     ],
   },
   {
@@ -65,7 +78,7 @@ const FIELDS = [
     aliases: [
       "gross earnings", "gross salary", "gross pay", "total earnings",
       "total gross", "gross total", "total earning", "gross ctc",
-      "total income", "total salary",
+      "total income", "total salary", "salary total",
     ],
   },
   {
@@ -73,34 +86,94 @@ const FIELDS = [
     aliases: [
       "net salary", "net pay", "take home", "take-home", "net amount",
       "amount payable", "net payable", "net income", "net wages",
+      "net salary received", "salary received",
     ],
   },
   { key: "ctc", aliases: ["ctc", "cost to company", "annual ctc", "total ctc", "gross ctc"] },
 ];
 
 const ALIAS_MAP = new Map();
+const ALIAS_COMPACT_MAP = new Map();
 for (const f of FIELDS) {
   for (const a of f.aliases) {
-    ALIAS_MAP.set(a.toLowerCase().trim(), { key: f.key, sum: !!f.sum });
+    const meta = { key: f.key, sum: !!f.sum };
+    ALIAS_MAP.set(a.toLowerCase().trim(), meta);
+    ALIAS_COMPACT_MAP.set(compactLabel(a), meta);
   }
 }
 
+function normalizeLabel(label) {
+  return String(label || "")
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
+    .replace(/[_|]/g, " ")
+    .replace(/\b(?:rs|inr|amount|amt|current|month|monthly|ytd|year\s*to\s*date|arrear|actual|earnings?|deductions?|payments?|salary|wages|description|particulars?)\b/gi, " ")
+    .replace(/[^\w\s.&()/+-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function compactLabel(label) {
+  return String(label || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
 function matchAlias(label) {
-  const l = label.toLowerCase().trim().replace(/\s+/g, " ");
+  const l = normalizeLabel(label).toLowerCase().trim().replace(/\s+/g, " ");
   if (ALIAS_MAP.has(l)) return ALIAS_MAP.get(l);
+  const compact = compactLabel(l);
+  if (ALIAS_COMPACT_MAP.has(compact)) return ALIAS_COMPACT_MAP.get(compact);
   // Partial-word match for common variants
   for (const [alias, meta] of ALIAS_MAP) {
     if (l === alias) return meta;
     if (l.startsWith(alias + " ") || alias.startsWith(l + " ")) return meta;
     if (l.includes(alias) && alias.length > 5) return meta;
   }
+  for (const [alias, meta] of ALIAS_COMPACT_MAP) {
+    if (compact.includes(alias) && alias.length > 4) return meta;
+    if (alias.includes(compact) && compact.length > 4) return meta;
+  }
   return null;
 }
 
 function toNumber(s) {
   if (s == null) return null;
-  const cleaned = String(s).replace(/,/g, "").replace(/[^\d.\-]/g, "");
+  let cleaned = String(s).replace(/(?:rs|inr|rp)\.?\s*|₹/gi, "").replace(/[^\d.,\-]/g, "");
   if (!cleaned || cleaned === "." || cleaned === "-") return null;
+
+  const lastDot = cleaned.lastIndexOf(".");
+  const lastComma = cleaned.lastIndexOf(",");
+  const dotCount = (cleaned.match(/\./g) || []).length;
+  const commaCount = (cleaned.match(/,/g) || []).length;
+
+  if (dotCount && commaCount) {
+    // The last separator is normally the decimal separator; the other is thousands.
+    if (lastDot > lastComma) cleaned = cleaned.replace(/,/g, "");
+    else cleaned = cleaned.replace(/\./g, "").replace(",", ".");
+  } else if (dotCount > 1) {
+    const lastGroup = cleaned.slice(lastDot + 1);
+    if (/^0+$/.test(lastGroup)) {
+      cleaned = cleaned.slice(0, lastDot).replace(/\./g, "") + "." + lastGroup;
+    } else {
+      cleaned = cleaned.replace(/\./g, "");
+    }
+  } else if (commaCount > 1) {
+    const lastGroup = cleaned.slice(lastComma + 1);
+    if (/^0+$/.test(lastGroup)) {
+      cleaned = cleaned.slice(0, lastComma).replace(/,/g, "") + "." + lastGroup;
+    } else {
+      cleaned = cleaned.replace(/,/g, "");
+    }
+  } else if (dotCount === 1) {
+    const decimals = cleaned.length - lastDot - 1;
+    const wholeDigits = cleaned.slice(0, lastDot).replace(/[^\d]/g, "").length;
+    const decimalPart = cleaned.slice(lastDot + 1);
+    if (decimals === 3 && wholeDigits <= 3 && !/^0+$/.test(decimalPart)) cleaned = cleaned.replace(".", "");
+  } else if (commaCount === 1) {
+    const decimals = cleaned.length - lastComma - 1;
+    const wholeDigits = cleaned.slice(0, lastComma).replace(/[^\d]/g, "").length;
+    const decimalPart = cleaned.slice(lastComma + 1);
+    cleaned = decimals === 3 && wholeDigits <= 3 && !/^0+$/.test(decimalPart) ? cleaned.replace(",", "") : cleaned.replace(",", ".");
+  }
+
   const n = parseFloat(cleaned);
   return Number.isFinite(n) && n >= 0 ? n : null;
 }
@@ -108,7 +181,7 @@ function toNumber(s) {
 // A line is a pure number if it contains ONLY digits, commas, decimal point (and optional leading dot)
 function isNumberLine(s) {
   const t = s.trim();
-  return /^-?[\d,]+(\.\d+)?$/.test(t) || /^\.\d+$/.test(t);
+  return /^(?:₹\s*)?(?:(?:Rs|INR|Rp)\.?\s*)?-?[\d.,]+$/i.test(t) || /^\.\d+$/.test(t);
 }
 
 // A line is purely textual (no digit characters at all)
@@ -121,6 +194,48 @@ function isPureTextLine(s) {
 function isMixedLine(s) {
   const t = s.trim();
   return /[a-zA-Z]/.test(t) && /\d/.test(t);
+}
+
+function isValueOnlyLine(s) {
+  return isNumberLine(s);
+}
+
+function moneyTokens(line) {
+  const tokens = [];
+  const re = /(?:(?:rs|inr|rp)\.?\s*|₹\s*)?-?[\d.,]+/gi;
+  let m;
+  while ((m = re.exec(line)) !== null) {
+    const n = toNumber(m[0]);
+    if (n != null) tokens.push({ value: n, index: m.index, raw: m[0] });
+  }
+  return tokens;
+}
+
+function firstMeaningfulAmount(tokens) {
+  const t = tokens.find((x) => x.value > 0);
+  return t ? t.value : null;
+}
+
+function addValue(result, meta, value) {
+  if (!meta || value == null || value <= 0) return;
+  result[meta.key] = meta.sum ? (result[meta.key] || 0) + value : result[meta.key] ?? value;
+}
+
+function setValue(result, meta, value) {
+  if (!meta || value == null || value <= 0) return;
+  result[meta.key] = meta.sum ? (result[meta.key] || 0) + value : value;
+}
+
+function cleanRowLabel(label) {
+  return normalizeLabel(label)
+    .replace(/\b(?:no|sr|sl|code|component|pay\s*head|head|rate|unit|days?)\b/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function findAliasInLine(line) {
+  const normalized = normalizeLabel(line);
+  return matchAlias(normalized);
 }
 
 function detectFrequency(text) {
@@ -201,11 +316,107 @@ function strategyLinePairs(lines) {
     if (!m) continue;
     const meta = matchAlias(m[1]);
     if (!meta) continue;
-    const n = toNumber(m[2]);
-    if (n != null && n > 0) {
-      result[meta.key] = meta.sum ? (result[meta.key] || 0) + n : result[meta.key] ?? n;
+    addValue(result, meta, toNumber(m[2]));
+  }
+  return result;
+}
+
+// ─── Strategy 2a: Adjacent label/value lines ─────────────────────────────────
+// Handles PDF text where table cells become separate lines:
+//   Basic
+//   ₹56,000.00
+// Also handles summary cards where the amount appears before the label:
+//   ₹1,07,000.00
+//   Total Net Pay
+function strategyAdjacentPairs(lines) {
+  const result = {};
+
+  for (let i = 0; i < lines.length - 1; i++) {
+    const current = lines[i].trim();
+    const next = lines[i + 1].trim();
+
+    if (isPureTextLine(current) && isValueOnlyLine(next)) {
+      const meta = matchAlias(current);
+      addValue(result, meta, toNumber(next));
+      continue;
+    }
+
+    if (isValueOnlyLine(current) && isPureTextLine(next)) {
+      const meta = matchAlias(next);
+      if (meta && !["net", "gross", "ctc"].includes(meta.key)) continue;
+      addValue(result, meta, toNumber(current));
     }
   }
+
+  return result;
+}
+
+// ─── Strategy 2b: Sequential label block followed by value block ─────────────
+// Some design-template payslips extract as:
+//   Basic Salary
+//   Transportation Allowance
+//   Rp.8000.000
+//   Rp. 500.000
+function strategySequentialBlocks(lines) {
+  const result = {};
+
+  for (let i = 0; i < lines.length; i++) {
+    const labels = [];
+    let j = i;
+
+    while (j < lines.length && isPureTextLine(lines[j])) {
+      const meta = matchAlias(lines[j]);
+      if (!meta) break;
+      labels.push(meta);
+      j++;
+    }
+
+    if (!labels.length) continue;
+
+    const values = [];
+    let k = j;
+    while (k < lines.length && isValueOnlyLine(lines[k])) {
+      const n = toNumber(lines[k]);
+      if (n != null) values.push(n);
+      k++;
+    }
+
+    if (!values.length) continue;
+    const count = Math.min(labels.length, values.length);
+    for (let x = 0; x < count; x++) {
+      setValue(result, labels[x], values[x]);
+    }
+    i = k - 1;
+  }
+
+  return result;
+}
+
+// ─── Strategy 2c: Table/row formats ──────────────────────────────────────────
+// Handles rows such as:
+//   "Basic Pay        50,000      6,00,000"
+//   "PF - Employee | 1,800 | 21,600"
+// The first amount is treated as the current payslip amount; later amounts are
+// usually YTD/annual columns.
+function strategyTableRows(lines) {
+  const result = {};
+
+  for (const raw of lines) {
+    const line = raw.replace(/\t/g, " ").trim();
+    if (!isMixedLine(line)) continue;
+    if (/\b(total|grand total|sub total)\b/i.test(line) && !matchAlias(line)) continue;
+
+    const tokens = moneyTokens(line);
+    if (!tokens.length) continue;
+
+    const labelBeforeFirstAmount = cleanRowLabel(line.slice(0, tokens[0].index));
+    const labelWithoutAmounts = cleanRowLabel(line.replace(/(?:(?:rs|inr|rp)\.?\s*|₹\s*)?-?[\d.,]+/gi, " "));
+    const meta = matchAlias(labelBeforeFirstAmount) || findAliasInLine(labelWithoutAmounts);
+    if (!meta) continue;
+
+    addValue(result, meta, firstMeaningfulAmount(tokens));
+  }
+
   return result;
 }
 
@@ -226,10 +437,7 @@ function strategyMultiPair(lines) {
       if (label.length < 2) continue;
       const meta = matchAlias(label);
       if (!meta) continue;
-      const n = toNumber(m[2]);
-      if (n != null && n > 0) {
-        result[meta.key] = meta.sum ? (result[meta.key] || 0) + n : result[meta.key] ?? n;
-      }
+      addValue(result, meta, toNumber(m[2]));
     }
   }
   return result;
@@ -238,9 +446,10 @@ function strategyMultiPair(lines) {
 // ─── Net pay prose extraction ─────────────────────────────────────────────────
 function extractNetPay(text) {
   const patterns = [
-    /net\s*pay\s*:?\s*(?:Rs\.?\s*|INR\s*)?([\d,]+(?:\.\d+)?)/i,
-    /take[\s-]*home\s*:?\s*(?:Rs\.?\s*)?([\d,]+(?:\.\d+)?)/i,
-    /net\s*amount\s*payable\s*:?\s*(?:Rs\.?\s*)?([\d,]+(?:\.\d+)?)/i,
+    /net\s*pay\s*:?\s*(?:(?:Rs|INR|Rp)\.?\s*)?([\d.,]+)/i,
+    /take[\s-]*home\s*:?\s*(?:(?:Rs|INR|Rp)\.?\s*)?([\d.,]+)/i,
+    /net\s*amount\s*payable\s*:?\s*(?:(?:Rs|INR|Rp)\.?\s*)?([\d.,]+)/i,
+    /net\s*salary\s*received\s*:?\s*(?:(?:Rs|INR|Rp)\.?\s*)?([\d.,]+)/i,
   ];
   for (const p of patterns) {
     const m = text.match(p);
@@ -277,10 +486,22 @@ function parseSalarySlipText(text) {
   // Run all strategies; merge with priority: Block > Lines > Multi
   const blockResult = strategyBlock(text);
   const lineResult = strategyLinePairs(lines);
+  const adjacentResult = strategyAdjacentPairs(lines);
+  const sequentialResult = strategySequentialBlocks(lines);
+  const tableResult = strategyTableRows(lines);
   const multiResult = strategyMultiPair(lines);
 
-  // Merge: multi first (lowest priority), then lines, then block overrides
+  // Merge: multi first (lowest priority), then adjacent/table rows, sequential, lines, then block overrides
   const merged = { ...multiResult };
+  for (const [k, v] of Object.entries(adjacentResult)) {
+    if (v > 0) merged[k] = v;
+  }
+  for (const [k, v] of Object.entries(tableResult)) {
+    if (v > 0) merged[k] = v;
+  }
+  for (const [k, v] of Object.entries(sequentialResult)) {
+    if (v > 0) merged[k] = v;
+  }
   for (const [k, v] of Object.entries(lineResult)) {
     if (v > 0) merged[k] = v;
   }
@@ -292,6 +513,11 @@ function parseSalarySlipText(text) {
   if (!merged.net) {
     const np = extractNetPay(text);
     if (np) merged.net = np;
+  }
+
+  if (!merged.gross) {
+    const computedGross = (merged.basic || 0) + (merged.hra || 0) + (merged.allowances || 0) + (merged.bonuses || 0);
+    if (computedGross > 0) merged.gross = computedGross;
   }
 
   // Guess frequency if still unknown
@@ -335,6 +561,14 @@ async function parsePdfBuffer(buffer) {
       missing: ["basic", "hra", "allowances", "bonuses", "pf", "professional_tax"],
       frequency: "unknown", multiplier: 1, confidence: "low", raw_text: "",
       parse_error: "Could not read PDF. Try pasting the text from the PDF instead.",
+    };
+  }
+  if (!text.trim()) {
+    return {
+      extracted: {}, extracted_raw: {},
+      missing: ["basic", "hra", "allowances", "bonuses", "pf", "professional_tax"],
+      frequency: "unknown", multiplier: 1, confidence: "low", raw_text: "",
+      parse_error: "This PDF does not contain selectable text. It looks like an image/scanned payslip, so OCR is required. Try uploading a text-based PDF or paste the payslip text.",
     };
   }
   return parseSalarySlipText(text);
